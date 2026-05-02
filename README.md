@@ -1,4 +1,4 @@
-sensor-data-pthreads
+# sensor-data-pthreads
 
 Linguagem: C
 
