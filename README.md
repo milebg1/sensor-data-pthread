@@ -6,6 +6,6 @@ Linguagem: C
 
 Biblioteca de Parsing: cJSON
 
-gcc main.c cJSON.c -o analisador -lm -pthread
+gcc main.c cJSON.c -o sensores -lm -pthread
 
-./analisador
+./sensores
