@@ -7,8 +7,7 @@
 #include <unistd.h>
 #include "cJSON.h"
 
-#define BUFFER_SIZE 1000
-
+#define BUFFER_SIZE 50000
 typedef struct {
 
     char cidade[50];
@@ -65,6 +64,8 @@ typedef struct {
 
     double bateria_inicial;
     double bateria_final;
+    char data_bateria_inicial[50];
+    char data_bateria_final[50];
 
     int primeira_bateria;
 
@@ -267,24 +268,28 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
 
     if (r.bateria != -1) {
 
-        if (e->primeira_bateria) {
+        if (e->primeira_bateria || strcmp(r.datahora, e->data_bateria_inicial) < 0) {
 
             e->bateria_inicial = r.bateria;
 
-            e->primeira_bateria = 0;
-        }
+            strcpy(e->data_bateria_inicial, r.datahora);
 
-        e->bateria_final = r.bateria;
+            e->primeira_bateria = 0;
     }
 
-    if (strlen(r.sf) > 0) {
+    if (strcmp(r.datahora, e->data_bateria_final) > 0) {
 
-        if (!sfExiste(e, r.sf)) {
-
-            strcpy(e->sfs[e->total_sf], r.sf);
-
-            e->total_sf++;
+            e->bateria_final = r.bateria;
+            
+            strcpy(e->data_bateria_final, r.datahora);
         }
+    }
+
+    if (strlen(r.sf) > 0 && !sfExiste(e, r.sf)) {
+
+        strcpy(e->sfs[e->total_sf], r.sf);
+
+        e->total_sf++;
     }
 
     e->total++;
@@ -358,7 +363,7 @@ void processarPayload(cJSON *json, Registro *r) {
                 r->bateria = valor->valuedouble;
         }
 
-        else if (strcmp(variavel, "spreading_factor") == 0) {
+        else if (strcmp(variavel, "lora_spreading_factor") == 0) {
 
             cJSON *valor = cJSON_GetObjectItem(item, "value");
 
