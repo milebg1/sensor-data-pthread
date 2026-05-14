@@ -7,7 +7,8 @@
 #include <unistd.h>
 #include "cJSON.h"
 
-#define BUFFER_SIZE 50000
+#define BUFFER_SIZE 1000 // Tamanho da Fila
+
 typedef struct {
 
     char cidade[50];
@@ -22,7 +23,7 @@ typedef struct {
 
     long id;
 
-} Registro;
+} Registro; // Registros lidos dos arquivos JSON e processados para cálculo das estatísticas
 
 typedef struct {
 
@@ -32,12 +33,12 @@ typedef struct {
     int fim;
     int quantidade;
 
-    pthread_mutex_t mutex;
+    pthread_mutex_t mutex; // Mutex para controle de acesso à fila
 
-    pthread_cond_t cheio;
-    pthread_cond_t vazio;
+    pthread_cond_t cheio;  // Condição para indicar que a fila está cheia e a thread de leitura deve esperar
+    pthread_cond_t vazio;  // Condição para indicar que a fila está vazia e a thread de processamento deve esperar
 
-} Fila;
+} Fila; // Estrutura de dados para implementação da fila utilizada para comunicação entre as threads de leitura e processamento
 
 typedef struct {
 
@@ -72,23 +73,26 @@ typedef struct {
     char sfs[10][20];
     int total_sf;
 
-    long total;
+    long total; // Total de registros processados para a cidade
+    int total_ids_sem_temp; // Contador para o número de registros sem dados de temperatura
+    int total_ids_sem_umid; // Contador para o número de registros sem dados de umidade
+    int total_ids_sem_press; // Contador para o número de registros sem dados
 
-} Estatisticas;
+} Estatisticas; // Estrutura para armazenar as estatísticas calculadas para cada cidade, incluindo mínimos, máximos, médias, dados de bateria e spreading factors utilizados
 
 Fila fila;
 
 Estatisticas caxias;
 Estatisticas bento;
 
-pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para controle de acesso ao arquivo de log, garantindo que as mensagens sejam registradas de forma consistente e sem conflitos entre as threads
 
-long ids_lidos[50000];
-int total_ids = 0;
+long ids_lidos[50000]; // Array para armazenar os IDs já lidos, utilizado para evitar processar registros duplicados    
+int total_ids = 0; // Contador para o número total de IDs armazenados no array ids_lidos
 
-pthread_mutex_t ids_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t ids_mutex = PTHREAD_MUTEX_INITIALIZER; // Mutex para controle de acesso ao array ids_lidos e ao contador total_ids, garantindo que as operações de verificação e adição de IDs sejam realizadas de forma segura entre as threads
 
-int terminou = 0;
+int terminou = 0; // Flag para indicar que a thread de leitura terminou
 
 void iniciarFila() {
 
@@ -96,10 +100,10 @@ void iniciarFila() {
     fila.fim = 0;
     fila.quantidade = 0;
 
-    pthread_mutex_init(&fila.mutex, NULL);
+    pthread_mutex_init(&fila.mutex, NULL); // Inicializa o mutex para controle de acesso à fila
 
-    pthread_cond_init(&fila.cheio, NULL);
-    pthread_cond_init(&fila.vazio, NULL);
+    pthread_cond_init(&fila.cheio, NULL);  // Inicializa a condição para indicar que a fila está cheia
+    pthread_cond_init(&fila.vazio, NULL);  // Inicializa a condição para indicar que a fila está vazia
 }
 
 void adicionarFila(Registro r) {
@@ -115,7 +119,7 @@ void adicionarFila(Registro r) {
 
     fila.quantidade++;
 
-    pthread_cond_signal(&fila.vazio);
+    pthread_cond_signal(&fila.vazio); // Sinaliza que a fila não está mais vazia, permitindo que a thread de processamento continue removendo registros
 
     pthread_mutex_unlock(&fila.mutex);
 }
@@ -140,13 +144,14 @@ int removerFila(Registro *r) {
 
     fila.quantidade--;
 
-    pthread_cond_signal(&fila.cheio);
+    pthread_cond_signal(&fila.cheio); // Sinaliza que a fila não está mais cheia, permitindo que a thread de leitura continue adicionando registros
 
     pthread_mutex_unlock(&fila.mutex);
 
     return 1;
 }
 
+// Função para registrar mensagens no arquivo de log, garantindo que o acesso ao arquivo seja controlado por um mutex para evitar conflitos entre as threads
 void logMensagem(const char *msg) {
 
     pthread_mutex_lock(&log_mutex);
@@ -163,27 +168,48 @@ void logMensagem(const char *msg) {
     pthread_mutex_unlock(&log_mutex);
 }
 
+void limparLog() {
+
+    FILE *f = fopen("processamento.log", "w");
+
+    if (f) {
+        fclose(f);
+    }
+}
+
+// Função para verificar se um ID já foi lido, utilizando um array para armazenar os IDs e um mutex para controlar o acesso a esse array, garantindo que a verificação e adição de IDs sejam realizadas de forma segura entre as threads
 int idRepetido(long id) {
 
     for (int i = 0; i < total_ids; i++) {
 
-        if (ids_lidos[i] == id)
+        if (ids_lidos[i] == id) {
+
+            char buffer[150];
+
+            sprintf(buffer,
+                    "DADO DUPLICADO ENCONTRADO - ID duplicado: %ld",
+                    id); // Mensagem de log indicando que um dado duplicado foi encontrado, com o ID do registro duplicado
+
+            logMensagem(buffer);
+
             return 1;
+        }
     }
 
     return 0;
 }
 
+// Função para inicializar a estrutura de estatísticas, definindo os valores mínimos e máximos para temperatura, umidade e pressão, além de inicializar as variáveis relacionadas à bateria e aos spreading factors utilizados
 void iniciarEstatisticas(Estatisticas *e) {
 
-    e->min_temp = DBL_MAX;
-    e->max_temp = -DBL_MAX;
+    e->min_temp = 100;
+    e->max_temp = -100;
 
-    e->min_umid = DBL_MAX;
-    e->max_umid = -DBL_MAX;
+    e->min_umid = 101;
+    e->max_umid = -1;
 
-    e->min_press = DBL_MAX;
-    e->max_press = -DBL_MAX;
+    e->min_press = 2000;
+    e->max_press = -1;
 
     e->soma_temp = 0;
     e->soma_umid = 0;
@@ -194,8 +220,15 @@ void iniciarEstatisticas(Estatisticas *e) {
     e->primeira_bateria = 1;
 
     e->total_sf = 0;
+
+    e->bateria_inicial = 0;
+    e->bateria_final = 0;
+
+    strcpy(e->data_bateria_inicial, "");
+    strcpy(e->data_bateria_final, "");
 }
 
+// Função para verificar se um spreading factor já foi registrado nas estatísticas, utilizando um array para armazenar os spreading factors e comparando o novo spreading factor com os já registrados
 int sfExiste(Estatisticas *e, char *sf) {
 
     for (int i = 0; i < e->total_sf; i++) {
@@ -207,9 +240,10 @@ int sfExiste(Estatisticas *e, char *sf) {
     return 0;
 }
 
+// Função para atualizar as estatísticas com base em um novo registro, verificando os valores de temperatura, umidade, pressão e bateria, e atualizando os mínimos, máximos, médias e dados relacionados à bateria e spreading factors utilizados
 void atualizarEstatisticas(Estatisticas *e, Registro r) {
 
-    if (r.temperatura != -1) {
+    if (r.temperatura != -1000) { // Verifica se a temperatura é válida antes de atualizar as estatísticas, utilizando um valor específico (-1000) para indicar que a temperatura não foi fornecida no registro
 
         if (r.temperatura < e->min_temp) {
 
@@ -226,9 +260,20 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
         }
 
         e->soma_temp += r.temperatura;
+    } else {
+
+        char buffer[150];
+
+        sprintf(buffer,
+                "REGISTRO SEM TEMPERATURA - ID: %ld",
+                r.id);
+
+        logMensagem(buffer);
+
+        e->total_ids_sem_temp++;
     }
 
-    if (r.umidade != -1) {
+    if (r.umidade != -1) { // Verifica se a umidade é válida antes de atualizar as estatísticas, utilizando um valor específico (-1) para indicar que a umidade não foi fornecida no registro
 
         if (r.umidade < e->min_umid) {
 
@@ -245,9 +290,19 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
         }
 
         e->soma_umid += r.umidade;
+    } else {
+
+        char buffer[150];
+        sprintf(buffer,
+                "REGISTRO SEM UMIDADE - ID: %ld",
+                r.id);
+
+        logMensagem(buffer);
+
+        e->total_ids_sem_umid++;
     }
 
-    if (r.pressao != -1) {
+    if (r.pressao != -1) { // Verifica se a pressão é válida antes de atualizar as estatísticas, utilizando um valor específico (-1) para indicar que a pressão não foi fornecida no registro
 
         if (r.pressao < e->min_press) {
 
@@ -264,9 +319,20 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
         }
 
         e->soma_press += r.pressao;
+    } else {
+
+        char buffer[150];
+
+        sprintf(buffer,
+                "REGISTRO SEM PRESSÃO - ID: %ld",
+                r.id);
+
+        logMensagem(buffer);
+
+        e->total_ids_sem_press++;
     }
 
-    if (r.bateria != -1) {
+    if (r.bateria != -1) { // Verifica se a bateria é válida antes de atualizar as estatísticas, utilizando um valor específico (-1) para indicar que a bateria não foi fornecida no registro
 
         if (e->primeira_bateria || strcmp(r.datahora, e->data_bateria_inicial) < 0) {
 
@@ -275,17 +341,17 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
             strcpy(e->data_bateria_inicial, r.datahora);
 
             e->primeira_bateria = 0;
-    }
+        }
 
-    if (strcmp(r.datahora, e->data_bateria_final) > 0) {
+        if (strlen(e->data_bateria_final) == 0 || strcmp(r.datahora, e->data_bateria_final) > 0) {
 
             e->bateria_final = r.bateria;
-            
+
             strcpy(e->data_bateria_final, r.datahora);
         }
     }
 
-    if (strlen(r.sf) > 0 && !sfExiste(e, r.sf)) {
+    if (strlen(r.sf) > 0 && !sfExiste(e, r.sf)) { // Verifica se o spreading factor é válido e ainda não foi registrado nas estatísticas, utilizando a função sfExiste para verificar se o spreading factor já foi registrado antes de adicioná-lo ao array de spreading factors utilizados
 
         strcpy(e->sfs[e->total_sf], r.sf);
 
@@ -295,15 +361,18 @@ void atualizarEstatisticas(Estatisticas *e, Registro r) {
     e->total++;
 }
 
+// Função para processar o payload de um registro, extraindo os valores de temperatura, umidade, pressão, bateria, data/hora e spreading factor, e preenchendo a estrutura do registro com esses valores
 void processarPayload(cJSON *json, Registro *r) {
 
-    r->temperatura = -1;
+    // Inicializa os valores do registro com indicadores de dados ausentes, utilizando valores específicos para temperatura (-1000), umidade (-1), pressão (-1) e bateria (-1) para indicar que esses dados não foram fornecidos no payload
+    r->temperatura = -1000;
     r->umidade = -1;
     r->pressao = -1;
     r->bateria = -1;
 
     strcpy(r->sf, "");
 
+    // Extrai o nome do dispositivo para determinar a cidade correspondente, utilizando a função strstr para verificar se o nome do dispositivo contém a string "Caxias" e atribuindo a cidade "Caxias do Sul" ou "Bento Gonçalves" com base nessa verificação
     cJSON *device = cJSON_GetObjectItem(json, "device_name");
 
     if (strstr(device->valuestring, "Caxias"))
@@ -313,19 +382,20 @@ void processarPayload(cJSON *json, Registro *r) {
 
     cJSON *dados = cJSON_GetObjectItem(json, "data");
 
-    int tam = cJSON_GetArraySize(dados);
+    int tam = cJSON_GetArraySize(dados); // Obtém o tamanho do array "data" no payload, utilizando a função cJSON_GetArraySize para determinar quantos itens estão presentes no array e iterar sobre eles para extrair os valores correspondentes de temperatura, umidade, pressão, bateria, data/hora e spreading factor
 
     for (int i = 0; i < tam; i++) {
 
-        cJSON *item = cJSON_GetArrayItem(dados, i);
+        cJSON *item = cJSON_GetArrayItem(dados, i); // Itera sobre os itens do array "data" no payload, utilizando a função cJSON_GetArrayItem para obter cada item e processá-lo individualmente
 
-        cJSON *var = cJSON_GetObjectItem(item, "variable");
+        cJSON *var = cJSON_GetObjectItem(item, "variable"); // Extrai o nome da variável do item do payload, utilizando a função cJSON_GetObjectItem para obter o valor da chave "variable" e verificando se o valor é válido antes de continuar o processamento do item
 
         if (!var)
             continue;
 
         char *variavel = var->valuestring;
 
+        // Verifica o nome da variável e extrai os valores correspondentes de temperatura, umidade, pressão, bateria, data/hora e spreading factor, preenchendo a estrutura do registro com esses valores
         if (strcmp(variavel, "temperature") == 0) {
 
             cJSON *valor = cJSON_GetObjectItem(item, "value");
@@ -373,6 +443,7 @@ void processarPayload(cJSON *json, Registro *r) {
     }
 }
 
+// Função para a thread de leitura, responsável por ler os arquivos JSON, processar os registros e adicionar os registros processados à fila para que a thread de processamento possa calcular as estatísticas, utilizando a biblioteca cJSON para parsear os arquivos JSON e extrair os dados necessários para preencher a estrutura do registro e atualizar as estatísticas
 void *threadLeitura(void *arg) {
 
     char *arquivo = (char *) arg;
@@ -433,7 +504,7 @@ void *threadLeitura(void *arg) {
 
             pthread_mutex_unlock(&ids_mutex);
 
-            continue;
+            continue; 
         }
 
         ids_lidos[total_ids] = id;
@@ -449,8 +520,7 @@ void *threadLeitura(void *arg) {
         if (!payload)
             continue;
 
-        cJSON *payload_json =
-            cJSON_Parse(payload->valuestring);
+        cJSON *payload_json = cJSON_Parse(payload->valuestring);
 
         if (!payload_json)
             continue;
@@ -495,6 +565,7 @@ void *threadProcessamento(void *arg) {
     pthread_exit(NULL);
 }
 
+// Função para a thread de logger, responsável por registrar mensagens de log periodicamente enquanto o sistema está executando, utilizando um loop que verifica a flag de término e registra mensagens a cada 2 segundos, e registrando uma mensagem final quando o logger é finalizado
 void *threadLogger(void *arg) {
 
     while (!terminou) {
@@ -509,6 +580,7 @@ void *threadLogger(void *arg) {
     pthread_exit(NULL);
 }
 
+// Função para imprimir os spreading factors utilizados nas estatísticas, iterando sobre o array de spreading factors e imprimindo cada um
 void imprimirSF(Estatisticas *e) {
 
     for (int i = 0; i < e->total_sf; i++) {
@@ -521,6 +593,8 @@ void imprimirSF(Estatisticas *e) {
 }
 
 int main() {
+
+    limparLog();
 
     struct timespec inicio, fim;
 
@@ -585,14 +659,14 @@ int main() {
            caxias.data_min_temp,
            caxias.max_temp,
            caxias.data_max_temp,
-           caxias.soma_temp / caxias.total);
+           caxias.soma_temp / (caxias.total - caxias.total_ids_sem_temp));
 
     printf("Bento Gonçalves   | %.2f | %s | %.2f | %s | %.2f\n",
            bento.min_temp,
            bento.data_min_temp,
            bento.max_temp,
            bento.data_max_temp,
-           bento.soma_temp / bento.total);
+           bento.soma_temp / (bento.total - bento.total_ids_sem_temp));
 
     printf("\n------------------------------------------------------------\n");
     printf("UMIDADE (%%)\n");
@@ -606,14 +680,14 @@ int main() {
            caxias.data_min_umid,
            caxias.max_umid,
            caxias.data_max_umid,
-           caxias.soma_umid / caxias.total);
+           caxias.soma_umid / (caxias.total - caxias.total_ids_sem_umid));
 
     printf("Bento Gonçalves   | %.2f | %s | %.2f | %s | %.2f\n",
            bento.min_umid,
            bento.data_min_umid,
            bento.max_umid,
            bento.data_max_umid,
-           bento.soma_umid / bento.total);
+           bento.soma_umid / (bento.total - bento.total_ids_sem_umid));
 
     printf("\n------------------------------------------------------------\n");
     printf("PRESSÃO ATMOSFÉRICA (hPa)\n");
@@ -627,14 +701,14 @@ int main() {
            caxias.data_min_press,
            caxias.max_press,
            caxias.data_max_press,
-           caxias.soma_press / caxias.total);
+           caxias.soma_press / (caxias.total - caxias.total_ids_sem_press));
 
     printf("Bento Gonçalves   | %.2f | %s | %.2f | %s | %.2f\n",
            bento.min_press,
            bento.data_min_press,
            bento.max_press,
            bento.data_max_press,
-           bento.soma_press / bento.total);
+           bento.soma_press / (bento.total - bento.total_ids_sem_press));
 
     printf("\n------------------------------------------------------------\n");
     printf("BATERIA\n");
@@ -676,11 +750,12 @@ int main() {
 
     printf("Tempo total de execução: %.2f segundos\n", tempo);
 
-    printf("Threads utilizadas: 3\n");
+    printf("Threads utilizadas: 4\n");
 
-    printf(" - Thread 1: leitura dos dados\n");
-    printf(" - Thread 2: cálculo das estatísticas\n");
-    printf(" - Thread 3: registro de logs\n");
+    printf(" - Thread 1: leitura dos dados do primeiro arquivo\n");
+    printf(" - Thread 2: leitura dos dados do segundo arquivo\n");
+    printf(" - Thread 3: cálculo das estatísticas\n");
+    printf(" - Thread 4: registro de logs\n");
 
     printf("\nArquivo de log gerado: processamento.log\n");
 
